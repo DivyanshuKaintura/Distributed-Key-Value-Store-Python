@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 User=ubuntu
-WorkingDirectory=/home/ubuntu/raft-basic-test
-ExecStart=/home/ubuntu/raft-basic-test/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+WorkingDirectory=/home/ubuntu/Distributed-Key-Value-Store-Python
+ExecStart=/home/ubuntu/Distributed-Key-Value-Store-Python/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=3
 
