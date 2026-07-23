@@ -20,6 +20,13 @@ def root():
     logger.info("Get request received")
     return {"message": "Hello World"}
   
+  
+@app.get("/health")
+def health():
+    logger.info("Health check request received")
+    return {"status": "healthy"}
+
+  
 @app.get("/kv/{key}")
 def get(key: str):
     logger.info(f"Get request received for key: {key}")
