@@ -1,0 +1,7 @@
+2026-07-24 00:59:33 [INFO] Delete request received for key: name
+2026-07-24 00:59:33 [ERROR] Key not found: name
+2026-07-24 00:59:39 [INFO] Post request received for key: name with value: Divyanshu
+2026-07-24 00:59:44 [INFO] Get request received for key: name
+2026-07-24 00:59:59 [INFO] Delete request received for key: name
+2026-07-24 01:00:05 [INFO] Get request received for key: name
+2026-07-24 01:00:05 [ERROR] Key not found: name
