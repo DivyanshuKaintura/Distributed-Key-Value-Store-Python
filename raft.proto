@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package raft;
+
+message PingRequest {
+    int32 user_id = 1;
+    int32 term = 2;
+}
+
+message PingResponse {
+    string message = 1;
+    bool alive = 2;
+}
+
+service Raft {
+    rpc Ping(PingRequest) returns (PingResponse);
+}

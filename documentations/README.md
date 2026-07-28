@@ -26,3 +26,6 @@ Add these repository secrets in GitHub:
 
 The app is started by [kvstore.service](kvstore.service), which runs `uvicorn main:app --host 0.0.0.0 --port 8000` from the project directory.
 "# Distributed-Key-Value-Store-Python" 
+
+
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. raft.proto
