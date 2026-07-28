@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package raft;
+
+// =============================================================================
+// RAFT SERVICE
+// =============================================================================
+// Every Raft node runs a server implementing this service AND holds a client
+// stub to every other node. Nodes call these two RPCs on their peers:
+//
+//   RequestVote   -> used during LEADER ELECTION (candidates ask for votes)
+//   AppendEntries -> used for LOG REPLICATION and as HEARTBEATS
+//                    (an AppendEntries with an empty `entries` list is just
+//                    a heartbeat, used by the leader to assert authority and
+//                    prevent followers from starting a new election)
+// =============================================================================
+service RaftService {
+  rpc RequestVote (RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+
+// =============================================================================
+// LOG ENTRY
+// =============================================================================
+// A single entry in a node's replicated log. The "command" is opaque to Raft
+// itself — Raft doesn't know or care what it means. In our case, it will be
+// something like a serialized "SET key=value" or "DELETE key" instruction
+// for our KV store's state machine to apply once the entry is committed.
+// =============================================================================
+message LogEntry {
+  int32 term = 1;      // term when this entry was created by the leader
+  int32 index = 2;      // this entry's position in the log (1-based, per the paper)
+  string command = 3;    // the actual command for the state machine, e.g. "SET foo bar"
+}
+
+
+// =============================================================================
+// RequestVote RPC
+// =============================================================================
+// Sent by candidates to gather votes during an election.
+// =============================================================================
+message RequestVoteRequest {
+  int32 term = 1;               // candidate's current term
+  string candidate_id = 2;       // who is requesting the vote (e.g. "node2")
+
+  // These two fields let the receiver check that the candidate's log is
+  // at least as up-to-date as its own before granting a vote — this is
+  // Raft's mechanism for ensuring a candidate with stale/incomplete log
+  // data can never become leader.
+  int32 last_log_index = 3;      // index of candidate's last log entry
+  int32 last_log_term = 4;       // term of candidate's last log entry
+}
+
+message RequestVoteResponse {
+  int32 term = 1;         // responder's currentTerm, so candidate can update itself
+  bool vote_granted = 2;   // true means the candidate received this node's vote
+}
+
+
+// =============================================================================
+// AppendEntries RPC
+// =============================================================================
+// Sent by the leader to:
+//   1. Replicate new log entries to followers, AND
+//   2. Serve as a heartbeat (empty `entries`) to maintain leadership and
+//      prevent followers' election timeouts from firing.
+// =============================================================================
+message AppendEntriesRequest {
+  int32 term = 1;               // leader's current term
+  string leader_id = 2;          // so followers can redirect clients to the leader
+
+  // These let the follower verify log consistency (the "consistency check")
+  // before accepting new entries — this is core to how Raft guarantees
+  // all nodes' logs stay identical up to the commit point.
+  int32 prev_log_index = 3;      // index of the log entry right before the new ones
+  int32 prev_log_term = 4;       // term of that entry
+
+  repeated LogEntry entries = 5; // new entries to append (empty = heartbeat)
+
+  int32 leader_commit = 6;       // leader's commitIndex, so followers know
+                                    // which entries are safe to apply to their
+                                    // own state machine
+}
+
+message AppendEntriesResponse {
+  int32 term = 1;      // responder's currentTerm, so leader can update itself
+  bool success = 2;      // true if follower's log now matches leader's up to
+                           // the entries sent (i.e. the consistency check passed)
+}
