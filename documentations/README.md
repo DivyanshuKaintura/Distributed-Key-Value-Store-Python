@@ -28,3 +28,10 @@ The app is started by [kvstore.service](kvstore.service), which runs `uvicorn ma
 "# Distributed-Key-Value-Store-Python" 
 
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. raft.proto
+
+# terminal 1
+python server.py --id node1 --port 50051 --peers "node2=localhost:50052,node3=localhost:50053"
+# terminal 2
+python server.py --id node2 --port 50052 --peers "node1=localhost:50051,node3=localhost:50053"
+# terminal 3
+python server.py --id node3 --port 50053 --peers "node1=localhost:50051,node2=localhost:50052"
