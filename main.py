@@ -8,9 +8,9 @@ Endpoints:
 """
 
 
-from in_memory_store import in_memory_store
+from helpers.in_memory_store import in_memory_store
 from fastapi import FastAPI
-from utils import logger
+from helpers.utils import logger
 
 app = FastAPI()
 store = in_memory_store()
