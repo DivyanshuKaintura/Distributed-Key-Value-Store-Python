@@ -21,6 +21,7 @@ import logging
 import grpc
 import raft_pb2
 import raft_pb2_grpc
+import persistence
 
 
 FOLLOWER = "FOLLOWER"
@@ -49,15 +50,20 @@ RPC_TIMEOUT = 1.0            # seconds - how long we wait for a single peer to r
 
 
 class RaftNode(raft_pb2_grpc.RaftServiceServicer):
-    def __init__(self, node_id: str, peers: dict[str, str]):
+    def __init__(self, node_id: str, peers: dict[str, str], storage_dir: str = "."):
         """
-        node_id: this node's own identifier, e.g. "node1"
-        peers:   dict mapping OTHER nodes' ids to their addresses,
-                 e.g. {"node2": "localhost:50052", "node3": "localhost:50053"}
-                 (does NOT include this node itself)
+        node_id:     this node's own identifier, e.g. "node1"
+        peers:       dict mapping OTHER nodes' ids to their addresses,
+                     e.g. {"node2": "localhost:50052", "node3": "localhost:50053"}
+                     (does NOT include this node itself)
+        storage_dir: directory where this node's persisted state file lives.
+                     Each node writes to its OWN file (named after its
+                     node_id), so multiple nodes can safely share the same
+                     storage_dir if needed (e.g. when testing locally).
         """
         self.node_id = node_id
         self.peers = peers
+        self.storage_dir = storage_dir
 
         # One persistent gRPC channel + stub per peer, created once up
         # front and reused for every RPC. Recreating a channel per call
@@ -67,10 +73,14 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
             channel = grpc.insecure_channel(address)
             self.peer_stubs[peer_id] = raft_pb2_grpc.RaftServiceStub(channel)
 
-        # --- Persistent state (Figure 2) — still in-memory for now ---
-        self.current_term = 0
-        self.voted_for = None
-        self.log: list[raft_pb2.LogEntry] = []
+        # --- Persistent state (Figure 2) ---
+        # NEW: load whatever was last saved to disk, instead of always
+        # starting fresh at term 0. On a brand-new node with no state
+        # file yet, this just returns the same (0, None, []) defaults
+        # as before.
+        self.current_term, self.voted_for, self.log = persistence.load_state(
+            self.node_id, self.storage_dir
+        )
 
         # --- Volatile state (all servers) ---
         self.commit_index = 0
@@ -119,6 +129,18 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
             return None
         return self.log[index - 1]
 
+    def _persist(self):
+        """
+        Writes current_term/voted_for/log to disk.
+
+        MUST be called (while still holding self.lock) any time ANY of
+        those three fields changes, and BEFORE we let control leave the
+        function that changed them — e.g. before returning an RPC
+        response, so a crash right after we tell a peer "vote granted"
+        can never leave that promise unrecorded on disk.
+        """
+        persistence.save_state(self.node_id, self.storage_dir, self.current_term, self.voted_for, self.log)
+
     # =====================================================================
     # RequestVote RPC handler
     # =====================================================================
@@ -131,6 +153,11 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
                 self.current_term = request.term
                 self.voted_for = None
                 self.state = FOLLOWER
+                # NEW: term changed and voted_for was cleared — persist
+                # BEFORE we go any further, so even if we crash before
+                # deciding on the vote below, we never forget we've
+                # already seen this higher term.
+                self._persist()
 
             candidate_log_is_up_to_date = (
                 request.last_log_term > self._last_log_term()
@@ -143,7 +170,13 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
 
             if can_vote and candidate_log_is_up_to_date:
                 self.voted_for = request.candidate_id
-                # NEW: granting a vote means a legitimate election is in
+                # NEW: MUST persist the vote before responding — this is
+                # the exact scenario from the paper: if we crash after
+                # sending "vote_granted=True" but before this write lands
+                # on disk, we could restart, forget we voted, and grant a
+                # second vote to a different candidate in the same term.
+                self._persist()
+                # granting a vote means a legitimate election is in
                 # progress — reset our own timer so we don't also become
                 # a candidate a moment later and split the vote further.
                 self._reset_event.set()
@@ -163,11 +196,13 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
             if request.term > self.current_term:
                 self.current_term = request.term
                 self.voted_for = None
+                # NEW: persist immediately - same reasoning as in RequestVote.
+                self._persist()
             self.state = FOLLOWER
 
-            # NEW: any valid AppendEntries (including a bare heartbeat)
-            # from a same-or-newer-term leader proves a leader exists,
-            # so reset our election timer.
+            # any valid AppendEntries (including a bare heartbeat) from a
+            # same-or-newer-term leader proves a leader exists, so reset
+            # our election timer.
             self._reset_event.set()
 
             if request.prev_log_index > 0:
@@ -175,6 +210,7 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
                 if prev_entry is None or prev_entry.term != request.prev_log_term:
                     return raft_pb2.AppendEntriesResponse(term=self.current_term, success=False)
 
+            log_changed = False
             for new_entry in request.entries:
                 existing = self._get_entry(new_entry.index)
                 if existing is not None and existing.term != new_entry.term:
@@ -182,6 +218,14 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
                     existing = None
                 if existing is None:
                     self.log.append(new_entry)
+                    log_changed = True
+
+            if log_changed:
+                # NEW: any entries we actually appended/overwrote must hit
+                # disk before we tell the leader "success=True" — otherwise
+                # a crash right after responding could lose entries the
+                # leader now believes are safely replicated here.
+                self._persist()
 
             if request.leader_commit > self.commit_index:
                 self.commit_index = min(request.leader_commit, self._last_log_index())
@@ -226,6 +270,11 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
             self.state = CANDIDATE
             self.current_term += 1
             self.voted_for = self.node_id   # a candidate always votes for itself
+            # NEW: must persist before sending out any RequestVote calls —
+            # if we crash right after asking for votes but before this
+            # write lands, we could restart and vote for someone else in
+            # a term we already started campaigning in ourselves.
+            self._persist()
             election_term = self.current_term
             last_log_index = self._last_log_index()
             last_log_term = self._last_log_term()
@@ -264,6 +313,7 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
                     self.current_term = response.term
                     self.state = FOLLOWER
                     self.voted_for = None
+                    self._persist()   # NEW
                     return
 
                 # Make sure we're still a candidate IN THIS SAME TERM —
@@ -340,6 +390,7 @@ class RaftNode(raft_pb2_grpc.RaftServiceServicer):
                         self.current_term = response.term
                         self.state = FOLLOWER
                         self.voted_for = None
+                        self._persist()   # NEW
                         return
 
             time.sleep(HEARTBEAT_INTERVAL)
